@@ -1,6 +1,13 @@
 "use client";
 
-import React, { useState, useCallback, ChangeEvent, memo, useRef } from "react";
+import React, {
+  useState,
+  useCallback,
+  ChangeEvent,
+  memo,
+  useRef,
+  useEffect,
+} from "react";
 import {
   Upload,
   Play,
@@ -19,9 +26,54 @@ import {
   Maximize2,
   Minimize2,
   Volume2,
+  Trash2,
+  Plus,
 } from "lucide-react";
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardContent,
+} from "@/src/components/ui/card";
 
-// Memoized submenu component for better performance
+// Types
+interface MenuItem {
+  id: string;
+  label: string;
+  shortcut?: string;
+  submenu?: MenuItem[];
+  action?: () => void;
+}
+
+interface MenuSection {
+  id: string;
+  label: string;
+  icon: React.ReactNode;
+}
+
+interface MediaFile {
+  id: string;
+  file: File;
+  url: string;
+  type: string;
+  duration?: number;
+  thumbnail?: string;
+}
+
+interface VideoState {
+  mediaFiles: MediaFile[];
+  currentTime: number[];
+}
+
+interface TimelineClip {
+  id: string;
+  mediaFileId: string;
+  startTime: number;
+  duration: number;
+  track: number;
+}
+
+// Memoized submenu component
 const SubMenu = memo(
   ({
     items,
@@ -49,29 +101,7 @@ const SubMenu = memo(
 
 SubMenu.displayName = "SubMenu";
 
-// Types
-interface MenuItem {
-  id: string;
-  label: string;
-  shortcut?: string;
-  submenu?: MenuItem[];
-  action?: () => void;
-}
-
-interface MenuSection {
-  id: string;
-  label: string;
-  icon: React.ReactNode;
-}
-
-interface VideoState {
-  file: File | null;
-  url: string | null;
-  duration: number;
-  currentTime: number;
-}
-
-// Menu configurations with actions
+// Menu configurations
 const createMenuItems = (handlers: {
   handleNew: () => void;
   handleOpen: () => void;
@@ -170,56 +200,90 @@ const menuSections: MenuSection[] = [
   { id: "export", label: "Export", icon: <Share className="w-4 h-4" /> },
 ];
 
+// Main component
 const VideoEditor: React.FC = () => {
-  // Refs for improved performance
-  const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // State
   const [activeSection, setActiveSection] = useState("import");
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [timelineClips, setTimelineClips] = useState<TimelineClip[]>([]);
+  const [selectedMediaFile, setSelectedMediaFile] = useState<string | null>(
+    null,
+  );
+
   const [videoState, setVideoState] = useState<VideoState>({
-    file: null,
-    url: null,
-    duration: 0,
-    currentTime: 0,
+    mediaFiles: [],
+    currentTime: [],
   });
 
-  // Menu action handlers
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyPress = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey) {
+        switch (e.key.toLowerCase()) {
+          case "n":
+            e.preventDefault();
+            handlers.handleNew();
+            break;
+          case "o":
+            e.preventDefault();
+            handlers.handleOpen();
+            break;
+          case "s":
+            e.preventDefault();
+            handlers.handleSave();
+            break;
+          case "i":
+            e.preventDefault();
+            handlers.handleImport();
+            break;
+          case "z":
+            e.preventDefault();
+            if (e.shiftKey) {
+              handlers.handleRedo();
+            } else {
+              handlers.handleUndo();
+            }
+            break;
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyPress);
+    return () => window.removeEventListener("keydown", handleKeyPress);
+  }, []);
+
   const handlers = {
     handleNew: () => {
-      setVideoState({ file: null, url: null, duration: 0, currentTime: 0 });
+      setVideoState({
+        mediaFiles: [],
+        currentTime: [],
+      });
+      setTimelineClips([]);
     },
     handleOpen: () => {
       fileInputRef.current?.click();
     },
     handleSave: () => {
-      // Implement save functionality
       console.log("Saving project...");
     },
     handleImport: () => {
       fileInputRef.current?.click();
     },
     handleExport: () => {
-      // Implement export functionality
       console.log("Exporting project...");
     },
     handleUndo: () => {
-      // Implement undo functionality
       console.log("Undo action");
     },
     handleRedo: () => {
-      // Implement redo functionality
       console.log("Redo action");
     },
     handleZoomIn: () => {
-      // Implement zoom in functionality
       console.log("Zoom in");
     },
     handleZoomOut: () => {
-      // Implement zoom out functionality
       console.log("Zoom out");
     },
     toggleFullscreen: useCallback(() => {
@@ -235,39 +299,115 @@ const VideoEditor: React.FC = () => {
 
   const menuItems = createMenuItems(handlers);
 
-  // File handling functions
-  const processVideoFile = useCallback((file: File) => {
-    if (file.type.startsWith("video/") || file.name.endsWith(".mkv")) {
+  const generateThumbnail = async (file: File): Promise<string> => {
+    return new Promise((resolve) => {
+      const video = document.createElement("video");
+      video.preload = "metadata";
+      video.src = URL.createObjectURL(file);
+      video.onloadeddata = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 160;
+        canvas.height = 90;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          video.currentTime = 1;
+          video.onseeked = () => {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            resolve(canvas.toDataURL());
+          };
+        }
+      };
+    });
+  };
+
+  const processMediaFiles = useCallback(async (files: File[]) => {
+    const newMediaFiles: MediaFile[] = [];
+
+    for (const file of files) {
+      const id = Math.random().toString(36).substr(2, 9);
       const url = URL.createObjectURL(file);
-      setVideoState((prev) => ({
-        ...prev,
+
+      let type = "unknown";
+      if (file.type.startsWith("video/")) {
+        type = "video";
+      } else if (file.type.startsWith("image/")) {
+        type = "image";
+      }
+
+      const thumbnail = type === "video" ? await generateThumbnail(file) : url;
+
+      newMediaFiles.push({
+        id,
         file,
         url,
-      }));
-    } else {
-      console.error("Invalid file type. Please use MP4 or MKV files.");
+        type,
+        thumbnail,
+      });
     }
+
+    setVideoState((prev) => ({
+      ...prev,
+      mediaFiles: [...prev.mediaFiles, ...newMediaFiles],
+    }));
   }, []);
 
   const handleDrop = useCallback(
     (e: React.DragEvent<HTMLDivElement>) => {
       e.preventDefault();
       setIsDragging(false);
-      const file = e.dataTransfer.files[0];
-      if (file) processVideoFile(file);
+      const files = Array.from(e.dataTransfer.files).filter(
+        (file) =>
+          file.type.startsWith("video/") || file.type.startsWith("image/"),
+      );
+      if (files.length > 0) processMediaFiles(files);
     },
-    [processVideoFile],
+    [processMediaFiles],
   );
 
   const handleFileInput = useCallback(
     (e: ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (file) processVideoFile(file);
+      const files = Array.from(e.target.files || []).filter(
+        (file) =>
+          file.type.startsWith("video/") || file.type.startsWith("image/"),
+      );
+      if (files.length > 0) processMediaFiles(files);
     },
-    [processVideoFile],
+    [processMediaFiles],
   );
 
-  // Utility functions
+  const handleMediaDragStart =
+    (mediaFileId: string) => (e: React.DragEvent) => {
+      e.dataTransfer.setData("mediaFileId", mediaFileId);
+    };
+
+  const handleTimelineDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const mediaFileId = e.dataTransfer.getData("mediaFileId");
+    const mediaFile = videoState.mediaFiles.find((f) => f.id === mediaFileId);
+
+    if (mediaFile) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      // Calculate track based on Y position
+      const track = Math.floor(y / 50);
+
+      // Calculate start time based on X position (assuming 100px = 1 second)
+      const startTime = x / 100;
+
+      const newClip: TimelineClip = {
+        id: Math.random().toString(36).substr(2, 9),
+        mediaFileId,
+        startTime,
+        duration: 5, // Default duration
+        track,
+      };
+
+      setTimelineClips((prev) => [...prev, newClip]);
+    }
+  };
+
   const formatTime = (seconds: number): string => {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
@@ -276,9 +416,17 @@ const VideoEditor: React.FC = () => {
     return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms.toString().padStart(2, "0")}`;
   };
 
+  const removeMediaFile = (id: string) => {
+    setVideoState((prev) => ({
+      ...prev,
+      mediaFiles: prev.mediaFiles.filter((file) => file.id !== id),
+    }));
+    setTimelineClips((prev) => prev.filter((clip) => clip.mediaFileId !== id));
+  };
+
   return (
     <div className="h-screen bg-[#1A1A1A] text-gray-200 flex flex-col overflow-hidden">
-      {/* Status Bar Menu */}
+      {/* Menu Bar */}
       <div className="bg-[#111111] border-b border-gray-800 flex items-center h-6 px-2">
         {menuItems.map((menu) => (
           <div key={menu.id} className="relative">
@@ -306,7 +454,7 @@ const VideoEditor: React.FC = () => {
         ))}
       </div>
 
-      {/* Main Toolbar */}
+      {/* Navigation Bar */}
       <div className="bg-[#111111] border-b border-gray-800">
         <div className="flex items-center h-8">
           <div className="px-3 py-1 border-r border-gray-800">
@@ -344,115 +492,209 @@ const VideoEditor: React.FC = () => {
       </div>
 
       {/* Main Content */}
-      <main className="flex-grow relative">
-        <div className="absolute inset-0 flex items-center justify-center p-2">
-          {!videoState.file ? (
-            <div
-              onDragOver={(e) => {
-                e.preventDefault();
-                setIsDragging(true);
-              }}
-              onDragLeave={(e) => {
-                e.preventDefault();
-                setIsDragging(false);
-              }}
-              onDrop={handleDrop}
-              className={`
-                border-2 border-dashed rounded-lg p-8
-                flex flex-col items-center justify-center
-                transition-colors duration-200
-                w-full h-full
-                ${
-                  isDragging
-                    ? "border-blue-500 bg-blue-500/10"
-                    : "border-gray-700 hover:border-gray-600"
-                }
-              `}
-            >
-              <Upload className="w-8 h-8 mb-3 text-gray-400" />
-              <p className="text-lg mb-2">Drag and drop your video here</p>
-              <p className="text-xs text-gray-400 mb-3">
-                Supported formats: MP4, MKV
-              </p>
-              <label className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-md text-sm cursor-pointer">
-                Choose File
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="video/mp4,video/x-matroska,.mkv"
-                  onChange={handleFileInput}
-                  className="hidden"
-                />
-              </label>
+      <main className="flex-grow flex">
+        {/* Import Library (only visible in import section) */}
+        {activeSection === "import" && (
+          <div className="w-64 bg-[#1A1A1A] border-r border-gray-800 flex flex-col">
+            <div className="p-2 border-b border-gray-800 flex justify-between items-center">
+              <span className="text-xs font-medium">Import Library</span>
+              <button
+                onClick={handlers.handleImport}
+                className="p-1 hover:bg-[#222222] rounded-sm"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
             </div>
-          ) : (
-            <div className="w-full h-full grid grid-rows-[2fr,1fr] gap-2">
-              <div className="bg-black rounded-lg overflow-hidden">
-                <video
-                  ref={videoRef}
-                  src={videoState.url ?? undefined}
-                  className="w-full h-full object-contain"
-                  controls
-                  onLoadedMetadata={(e) => {
-                    const video = e.target as HTMLVideoElement;
-                    setVideoState((prev) => ({
-                      ...prev,
-                      duration: video.duration,
-                    }));
-                  }}
-                  onTimeUpdate={(e) => {
-                    const video = e.target as HTMLVideoElement;
-                    setVideoState((prev) => ({
-                      ...prev,
-                      currentTime: video.currentTime,
-                    }));
-                  }}
-                />
-              </div>
 
-              <div className="bg-[#222222] rounded-lg border border-gray-800 flex flex-col">
-                <div className="flex items-center gap-2 p-1 border-b border-gray-800">
-                  <button
-                    onClick={handlers.handleUndo}
-                    className="p-1 hover:bg-[#333333] rounded-md"
-                  >
-                    <Undo className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={handlers.handleRedo}
-                    className="p-1 hover:bg-[#333333] rounded-md"
-                  >
-                    <Redo className="w-4 h-4" />
-                  </button>
-                  <div className="w-px h-4 bg-gray-700" />
-                  <button className="p-1 hover:bg-[#333333] rounded-md">
-                    <Scissors className="w-4 h-4" />
-                  </button>
-                </div>
-
-                <div className="flex-grow bg-[#2A2A2A] relative">
-                  <div className="absolute inset-0 flex items-center justify-center text-gray-500 text-xs">
-                    Timeline preview will appear here
+            <div className="flex-grow overflow-y-auto">
+              {videoState.mediaFiles.map((media) => (
+                <div
+                  key={media.id}
+                  className={`p-2 border-b border-gray-800 hover:bg-[#222222] cursor-move ${
+                    selectedMediaFile === media.id ? "bg-[#2A2A2A]" : ""
+                  }`}
+                  draggable
+                  onDragStart={handleMediaDragStart(media.id)}
+                  onClick={() => setSelectedMediaFile(media.id)}
+                >
+                  <div className="flex items-start gap-2">
+                    <div className="w-20 h-12 bg-black rounded overflow-hidden flex-shrink-0">
+                      {media.thumbnail && (
+                        <img
+                          src={media.thumbnail}
+                          alt={media.file.name}
+                          className="w-full h-full object-cover"
+                        />
+                      )}
+                    </div>
+                    <div className="flex-grow min-w-0">
+                      <p className="text-xs truncate">{media.file.name}</p>
+                      <p className="text-xs text-gray-400">
+                        {(media.file.size / 1024 / 1024).toFixed(1)} MB
+                      </p>
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeMediaFile(media.id);
+                      }}
+                      className="p-1 hover:bg-[#333333] rounded-sm"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
                   </div>
                 </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Main Preview/Content Area */}
+        <div className="flex-grow flex flex-col">
+          {/* Preview Area */}
+          <div className="flex-grow relative">
+            {videoState.mediaFiles.length === 0 ? (
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDragging(true);
+                }}
+                onDragLeave={(e) => {
+                  e.preventDefault();
+                  setIsDragging(false);
+                }}
+                onDrop={handleDrop}
+                className={`
+                                  absolute inset-0 m-2
+                                  border-2 border-dashed rounded-lg
+                                  flex flex-col items-center justify-center
+                                  transition-colors duration-200
+                                  ${
+                                    isDragging
+                                      ? "border-blue-500 bg-blue-500/10"
+                                      : "border-gray-700 hover:border-gray-600"
+                                  }
+                                `}
+              >
+                <Upload className="w-8 h-8 mb-3 text-gray-400" />
+                <p className="text-lg mb-2">Drag and drop your media here</p>
+                <p className="text-xs text-gray-400 mb-3">
+                  Supported formats: MP4, MKV, JPG, PNG
+                </p>
+                <label className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-md text-sm cursor-pointer">
+                  Choose Files
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="video/*,image/*"
+                    multiple
+                    onChange={handleFileInput}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+            ) : (
+              <div className="absolute inset-0 m-2 bg-black rounded-lg overflow-hidden">
+                {selectedMediaFile && (
+                  <div className="w-full h-full flex items-center justify-center">
+                    {(() => {
+                      const media = videoState.mediaFiles.find(
+                        (m) => m.id === selectedMediaFile,
+                      );
+                      if (!media) return null;
+
+                      if (media.type === "video") {
+                        return (
+                          <video
+                            src={media.url}
+                            className="max-w-full max-h-full"
+                            controls
+                          />
+                        );
+                      } else if (media.type === "image") {
+                        return (
+                          <img
+                            src={media.url}
+                            alt={media.file.name}
+                            className="max-w-full max-h-full object-contain"
+                          />
+                        );
+                      }
+                    })()}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Timeline */}
+          <div
+            className="h-32 bg-[#111111] border-t border-gray-800 overflow-x-auto"
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={handleTimelineDrop}
+          >
+            <div className="relative h-full" style={{ minWidth: "1000px" }}>
+              {/* Time markers */}
+              <div className="h-5 border-b border-gray-800 flex">
+                {Array.from({ length: 10 }).map((_, i) => (
+                  <div
+                    key={i}
+                    className="w-[100px] flex-shrink-0 border-r border-gray-800 text-xs text-gray-400 px-1"
+                  >
+                    {formatTime(i)}
+                  </div>
+                ))}
+              </div>
+
+              {/* Tracks */}
+              <div className="flex flex-col h-[calc(100%-20px)]">
+                {Array.from({ length: 3 }).map((_, trackIndex) => (
+                  <div
+                    key={trackIndex}
+                    className="h-[33.33%] border-b border-gray-800 relative"
+                  >
+                    {timelineClips
+                      .filter((clip) => clip.track === trackIndex)
+                      .map((clip) => {
+                        const media = videoState.mediaFiles.find(
+                          (m) => m.id === clip.mediaFileId,
+                        );
+                        if (!media) return null;
+
+                        return (
+                          <div
+                            key={clip.id}
+                            className="absolute h-full bg-blue-600 rounded cursor-move"
+                            style={{
+                              left: `${clip.startTime * 100}px`,
+                              width: `${clip.duration * 100}px`,
+                            }}
+                          >
+                            <div className="p-1 text-xs truncate">
+                              {media.file.name}
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                ))}
               </div>
             </div>
-          )}
+          </div>
         </div>
       </main>
 
-      {/* Bottom Status Bar */}
+      {/* Status Bar */}
       <div className="bg-[#111111] border-t border-gray-800 text-xs text-gray-400">
         <div className="flex items-center justify-between px-3 h-5">
           <div className="flex items-center gap-3">
             <span className="flex items-center gap-1">
               <HardDrive className="w-3 h-3" />
-              {videoState.file ? videoState.file.name : "No file loaded"}
+              {videoState.mediaFiles.length} files
             </span>
             <span className="flex items-center gap-1">
               <Clock className="w-3 h-3" />
-              {formatTime(videoState.currentTime)} /{" "}
-              {formatTime(videoState.duration)}
+              {formatTime(0)}
             </span>
           </div>
 
@@ -489,59 +731,4 @@ const VideoEditor: React.FC = () => {
   );
 };
 
-// Keyboard shortcuts handler
-const useKeyboardShortcuts = (handlers: Record<string, () => void>) => {
-  React.useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey) {
-        switch (e.key.toLowerCase()) {
-          case "n":
-            e.preventDefault();
-            handlers.handleNew();
-            break;
-          case "o":
-            e.preventDefault();
-            handlers.handleOpen();
-            break;
-          case "s":
-            e.preventDefault();
-            handlers.handleSave();
-            break;
-          case "i":
-            e.preventDefault();
-            handlers.handleImport();
-            break;
-          case "e":
-            e.preventDefault();
-            handlers.handleExport();
-            break;
-          case "z":
-            e.preventDefault();
-            if (e.shiftKey) {
-              handlers.handleRedo();
-            } else {
-              handlers.handleUndo();
-            }
-            break;
-          case "=":
-            e.preventDefault();
-            handlers.handleZoomIn();
-            break;
-          case "-":
-            e.preventDefault();
-            handlers.handleZoomOut();
-            break;
-        }
-      } else if (e.key === "F11") {
-        e.preventDefault();
-        handlers.toggleFullscreen();
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [handlers]);
-};
-
-// Export a memoized version of the component for better performance
 export default memo(VideoEditor);
