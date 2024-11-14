@@ -29,12 +29,7 @@ import {
   Trash2,
   Plus,
 } from "lucide-react";
-import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardContent,
-} from "@/src/components/ui/card";
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 
 // Types
 interface MenuItem {
@@ -301,22 +296,37 @@ const VideoEditor: React.FC = () => {
 
   const generateThumbnail = async (file: File): Promise<string> => {
     return new Promise((resolve) => {
-      const video = document.createElement("video");
-      video.preload = "metadata";
-      video.src = URL.createObjectURL(file);
-      video.onloadeddata = () => {
-        const canvas = document.createElement("canvas");
-        canvas.width = 160;
-        canvas.height = 90;
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          video.currentTime = 1;
-          video.onseeked = () => {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      if (file.type.startsWith("video/")) {
+        const video = document.createElement("video");
+        video.preload = "metadata";
+        video.src = URL.createObjectURL(file);
+        video.onloadeddata = () => {
+          const canvas = document.createElement("canvas");
+          canvas.width = 160;
+          canvas.height = 90;
+          const ctx = canvas.getContext("2d");
+          if (ctx) {
+            video.currentTime = 1;
+            video.onseeked = () => {
+              ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+              resolve(canvas.toDataURL());
+            };
+          }
+        };
+      } else if (file.type.startsWith("image/")) {
+        const img = new Image();
+        img.src = URL.createObjectURL(file);
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          canvas.width = 160;
+          canvas.height = 90;
+          const ctx = canvas.getContext("2d");
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
             resolve(canvas.toDataURL());
-          };
-        }
-      };
+          }
+        };
+      }
     });
   };
 
@@ -324,25 +334,20 @@ const VideoEditor: React.FC = () => {
     const newMediaFiles: MediaFile[] = [];
 
     for (const file of files) {
-      const id = Math.random().toString(36).substr(2, 9);
-      const url = URL.createObjectURL(file);
+      if (file.type.startsWith("video/") || file.type.startsWith("image/")) {
+        const id = Math.random().toString(36).substr(2, 9);
+        const url = URL.createObjectURL(file);
+        const type = file.type.startsWith("video/") ? "video" : "image";
+        const thumbnail = await generateThumbnail(file);
 
-      let type = "unknown";
-      if (file.type.startsWith("video/")) {
-        type = "video";
-      } else if (file.type.startsWith("image/")) {
-        type = "image";
+        newMediaFiles.push({
+          id,
+          file,
+          url,
+          type,
+          thumbnail,
+        });
       }
-
-      const thumbnail = type === "video" ? await generateThumbnail(file) : url;
-
-      newMediaFiles.push({
-        id,
-        file,
-        url,
-        type,
-        thumbnail,
-      });
     }
 
     setVideoState((prev) => ({
@@ -355,11 +360,27 @@ const VideoEditor: React.FC = () => {
     (e: React.DragEvent<HTMLDivElement>) => {
       e.preventDefault();
       setIsDragging(false);
-      const files = Array.from(e.dataTransfer.files).filter(
-        (file) =>
-          file.type.startsWith("video/") || file.type.startsWith("image/"),
-      );
-      if (files.length > 0) processMediaFiles(files);
+
+      // Get files from drag event
+      const items = Array.from(e.dataTransfer.items);
+      const files: File[] = [];
+
+      // Process each item
+      items.forEach((item) => {
+        if (item.kind === "file") {
+          const file = item.getAsFile();
+          if (
+            file &&
+            (file.type.startsWith("video/") || file.type.startsWith("image/"))
+          ) {
+            files.push(file);
+          }
+        }
+      });
+
+      if (files.length > 0) {
+        processMediaFiles(files);
+      }
     },
     [processMediaFiles],
   );
@@ -370,7 +391,13 @@ const VideoEditor: React.FC = () => {
         (file) =>
           file.type.startsWith("video/") || file.type.startsWith("image/"),
       );
-      if (files.length > 0) processMediaFiles(files);
+      if (files.length > 0) {
+        processMediaFiles(files);
+      }
+      // Reset input value to allow selecting the same file again
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
     },
     [processMediaFiles],
   );
@@ -378,7 +405,13 @@ const VideoEditor: React.FC = () => {
   const handleMediaDragStart =
     (mediaFileId: string) => (e: React.DragEvent) => {
       e.dataTransfer.setData("mediaFileId", mediaFileId);
+      e.dataTransfer.effectAllowed = "move";
     };
+
+  const handleTimelineDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  };
 
   const handleTimelineDrop = (e: React.DragEvent) => {
     e.preventDefault();
@@ -391,17 +424,20 @@ const VideoEditor: React.FC = () => {
       const y = e.clientY - rect.top;
 
       // Calculate track based on Y position
-      const track = Math.floor(y / 50);
+      const track = Math.floor((y - 20) / ((rect.height - 20) / 3)); // Subtract header height
+
+      // Ensure track is within bounds
+      const boundedTrack = Math.max(0, Math.min(2, track));
 
       // Calculate start time based on X position (assuming 100px = 1 second)
-      const startTime = x / 100;
+      const startTime = Math.max(0, x / 100);
 
       const newClip: TimelineClip = {
         id: Math.random().toString(36).substr(2, 9),
         mediaFileId,
         startTime,
         duration: 5, // Default duration
-        track,
+        track: boundedTrack,
       };
 
       setTimelineClips((prev) => [...prev, newClip]);
@@ -413,7 +449,11 @@ const VideoEditor: React.FC = () => {
     const m = Math.floor((seconds % 3600) / 60);
     const s = Math.floor(seconds % 60);
     const ms = Math.floor((seconds % 1) * 100);
-    return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms.toString().padStart(2, "0")}`;
+    return `${h.toString().padStart(2, "0")}:${m
+      .toString()
+      .padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms
+      .toString()
+      .padStart(2, "0")}`;
   };
 
   const removeMediaFile = (id: string) => {
@@ -422,10 +462,23 @@ const VideoEditor: React.FC = () => {
       mediaFiles: prev.mediaFiles.filter((file) => file.id !== id),
     }));
     setTimelineClips((prev) => prev.filter((clip) => clip.mediaFileId !== id));
+    if (selectedMediaFile === id) {
+      setSelectedMediaFile(null);
+    }
   };
 
   return (
     <div className="h-screen bg-[#1A1A1A] text-gray-200 flex flex-col overflow-hidden">
+      {/* Hidden file input for importing media */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="video/*,image/*"
+        multiple
+        onChange={handleFileInput}
+        className="hidden"
+      />
+
       {/* Menu Bar */}
       <div className="bg-[#111111] border-b border-gray-800 flex items-center h-6 px-2">
         {menuItems.map((menu) => (
@@ -467,15 +520,15 @@ const VideoEditor: React.FC = () => {
                 key={section.id}
                 onClick={() => setActiveSection(section.id)}
                 className={`
-                  px-4 py-1.5 flex items-center gap-1.5 text-xs
-                  border-r border-gray-800
-                  transition-colors duration-150
-                  ${
-                    activeSection === section.id
-                      ? "bg-[#2A2A2A] text-white"
-                      : "hover:bg-[#222222]"
-                  }
-                `}
+                                  px-4 py-1.5 flex items-center gap-1.5 text-xs
+                                  border-r border-gray-800
+                                  transition-colors duration-150
+                                  ${
+                                    activeSection === section.id
+                                      ? "bg-[#2A2A2A] text-white"
+                                      : "hover:bg-[#222222]"
+                                  }
+                                `}
               >
                 {section.icon}
                 {section.label}
@@ -492,14 +545,31 @@ const VideoEditor: React.FC = () => {
       </div>
 
       {/* Main Content */}
-      <main className="flex-grow flex">
+      <main
+        className="flex-grow flex"
+        onDragOver={(e) => {
+          e.preventDefault();
+          setIsDragging(true);
+        }}
+        onDragLeave={(e) => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          const x = e.clientX - rect.left;
+          const y = e.clientY - rect.top;
+
+          // Only set dragging false if we've actually left the main area
+          if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
+            setIsDragging(false);
+          }
+        }}
+        onDrop={handleDrop}
+      >
         {/* Import Library (only visible in import section) */}
         {activeSection === "import" && (
           <div className="w-64 bg-[#1A1A1A] border-r border-gray-800 flex flex-col">
             <div className="p-2 border-b border-gray-800 flex justify-between items-center">
               <span className="text-xs font-medium">Import Library</span>
               <button
-                onClick={handlers.handleImport}
+                onClick={() => fileInputRef.current?.click()}
                 className="p-1 hover:bg-[#222222] rounded-sm"
               >
                 <Plus className="w-4 h-4" />
@@ -555,15 +625,6 @@ const VideoEditor: React.FC = () => {
           <div className="flex-grow relative">
             {videoState.mediaFiles.length === 0 ? (
               <div
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setIsDragging(true);
-                }}
-                onDragLeave={(e) => {
-                  e.preventDefault();
-                  setIsDragging(false);
-                }}
-                onDrop={handleDrop}
                 className={`
                                   absolute inset-0 m-2
                                   border-2 border-dashed rounded-lg
@@ -581,17 +642,12 @@ const VideoEditor: React.FC = () => {
                 <p className="text-xs text-gray-400 mb-3">
                   Supported formats: MP4, MKV, JPG, PNG
                 </p>
-                <label className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-md text-sm cursor-pointer">
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-md text-sm"
+                >
                   Choose Files
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="video/*,image/*"
-                    multiple
-                    onChange={handleFileInput}
-                    className="hidden"
-                  />
-                </label>
+                </button>
               </div>
             ) : (
               <div className="absolute inset-0 m-2 bg-black rounded-lg overflow-hidden">
@@ -630,7 +686,7 @@ const VideoEditor: React.FC = () => {
           {/* Timeline */}
           <div
             className="h-32 bg-[#111111] border-t border-gray-800 overflow-x-auto"
-            onDragOver={(e) => e.preventDefault()}
+            onDragOver={handleTimelineDragOver}
             onDrop={handleTimelineDrop}
           >
             <div className="relative h-full" style={{ minWidth: "1000px" }}>
